@@ -316,7 +316,11 @@ def python_launcher(job):
             params[name] = vals
         else:
             raise Exception("Unknown parameter type.")
-
+    
+    # Adding constant variables
+    dataname = job['dataname']
+    numtrees = job['numtrees']
+    
     # Load up this module and run
     main_file = job['main-file']
     if main_file[-3:] == '.py':
@@ -324,7 +328,7 @@ def python_launcher(job):
     sys.stderr.write('Importing %s.py\n' % main_file)
     module  = __import__(main_file)
     sys.stderr.write('Running %s.main()\n' % main_file)
-    result = module.main(job['id'], params)
+    result = module.main(job['id'], params, dataname, numtrees)
 
     # Change back out.
     os.chdir('..')

@@ -242,6 +242,8 @@ class DefaultChooser(object):
         self.grid        = None
         self.task_group  = None
         self.isFit = False
+        self.best_observed_value = None
+        self.best_observed_location = None
 
     def fit(self, task_group, hypers=None, options=None):
         """return a set of hyper parameters for the model fitted to the data
@@ -302,6 +304,7 @@ class DefaultChooser(object):
                 vals = data_dict['values'] if data_dict.has_key('values') else data_dict['counts']
 
                 sys.stderr.write('Fitting %s for %s task...\n' % (model_class, task_name))
+                #sys.stderr.write('Hypers: %s \n' % (hypers.get(task_name, None)))
                 new_hypers[task_name] = self.models[task_name].fit(
                     data_dict['inputs'],
                     vals,
@@ -341,7 +344,7 @@ class DefaultChooser(object):
         # Compute EI on the grid
         grid_pred = np.vstack((self.grid, spray_points))
         grid_ei = self.acquisition_function_over_hypers(grid_pred, current_best, compute_grad=False)
-
+        
         # Find the points on the grid with highest EI
         best_grid_inds = np.argsort(grid_ei)[-self.grid_subset:]
         best_grid_pred = grid_pred[best_grid_inds]
@@ -502,8 +505,14 @@ class DefaultChooser(object):
                 self.task_group.paramify_and_print(best_observed_location.flatten(), left_indent=16, indent_top_row=True)
 
 
+        self.best_observed_location = best_observed_location
+        self.best_observed_value = best_observed_value
+
         # Return according to model, not observed
         return current_best_value, current_best_location
+    
+    def get_best(self):
+        return self.best_observed_value, self.best_observed_location
 
     def numConstraints(self):
         return len(self.constraints)

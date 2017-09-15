@@ -187,6 +187,7 @@ import optparse
 import importlib
 import time
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 import numpy as np
 
@@ -223,6 +224,7 @@ def get_options():
             options = json.load(f, object_pairs_hook=OrderedDict)
     except:
         raise Exception("config.json did not load properly. Perhaps a spurious comma?")
+    
     options["config"]  = commandline_kwargs.config_file
 
 
@@ -242,14 +244,13 @@ def get_options():
         sys.stderr.write("Cannot find experiment directory '%s'. "
                          "Aborting.\n" % (expt_dir))
         sys.exit(-1)
-
+    
     return options, expt_dir
 
 def main():
     options, expt_dir = get_options()
-
+    
     resources = parse_resources_from_config(options)
-
     # Load up the chooser.
     chooser_module = importlib.import_module('spearmint.choosers.' + options['chooser'])
     chooser = chooser_module.init(options)
@@ -260,12 +261,17 @@ def main():
     sys.stderr.write('Using database at %s.\n' % db_address)        
     db         = MongoDB(database_address=db_address)
     
-    while True:
+    # Setting up record for convergence
+    past_best = []
+    converg_num = 20
+    startTraining = time.time()
+    while stoppingCriterion(past_best, converg_num):
 
         for resource_name, resource in resources.iteritems():
 
             jobs = load_jobs(db, experiment_name)
-            # resource.printStatus(jobs)
+            #print jobs[0]['values']['main']
+            #resource.printStatus(jobs)
 
             # If the resource is currently accepting more jobs
             # TODO: here cost will eventually also be considered: even if the 
@@ -302,12 +308,110 @@ def main():
                 # Print out the status of the resources
                 # resource.printStatus(jobs)
                 print_resources_status(resources.values(), jobs)
+                
+                # Record current best
+                best_val, best_input = chooser.get_best()
+                past_best.append(best_val)
+                past_best = [x for x in past_best if x is not None] #filter out Nones
+                if len(past_best) > converg_num:
+                    past_best.pop(0)
 
         # If no resources are accepting jobs, sleep
         # (they might be accepting if suggest takes a while and so some jobs already finished by the time this point is reached)
         if tired(db, experiment_name, resources):
+            print "Sleeping..."
             time.sleep(options.get('polling-time', 5))
+        
+    endTraining = time.time()
+    trainingTime = endTraining - startTraining
+    
+    # After training, test best results
+    runBestParams(5000, chooser, db, experiment_name, trainingTime)
+    
+#def stoppingCriterion(jobs):
+#    if jobs == 0:
+#        return True
+#    elif len(jobs) <= 20:
+#        return True
+#    else:
+#        #print jobs
+#        job_id = len(jobs)-2
+#        # Compute the average Q of the past 10 jobs
+#        average1 = 0
+#        average2 = 0
+#        for i in range(5):
+#            average1 = average1 + abs(jobs[job_id-i]['values']['main'])
+#            average2 = average2 + abs(jobs[job_id-i-1]['values']['main'])
+#        
+#        diff = 1.0*abs(average1-average2)/5
+#        print 'Past jobs convergence comparison:', diff
+#        if diff <= 1e-4:
+#            print "Stopping criterion reached:"
+#            print diff
+#            return False
+#        
+#        return True
 
+def stoppingCriterion(past_best, converg_num):
+    runs = len(past_best)
+    if runs == 0:
+        return True
+    elif runs < converg_num:
+        return True
+    else:
+        #print past_best
+        #print abs(np.diff(past_best))
+        diff = 1.0*sum(abs(np.diff(past_best)))/converg_num
+        print 'Past jobs convergence comparison:', diff
+        
+        if diff <= 1e-5:
+            print "Stopping criterion reached:", diff
+            return False
+        
+        return True
+        
+# Writes out the information to a file
+def runBestParams(numtrees, chooser, db, experiment_name, trainingTime):
+    # Get the best job
+    best_val, best_input = chooser.get_best()
+    print best_input, best_val
+    
+    jobs = load_jobs(db, experiment_name)
+    job = jobs[0]
+    
+    # Change into the directory.
+    sys.path.append(os.path.realpath(job['expt_dir']))
+    os.chdir(job['expt_dir'])
+    
+    # Hardcoding the parameter values
+    params = {}
+    params["nodesize"] = best_input[0][0]
+    params["lambdaV"] = best_input[0][1]
+    
+    # Adding constant variables
+    dataname = job['dataname']
+    main_file = job['main-file']
+    
+    # Writing information to file
+    filename = "bestGP_%s.txt" % dataname
+    bestJob = open(filename, "w")
+    bestJob.write('Main File: %s.py\n' % main_file)
+    #bestJob.write("Experiment Directory: %s\n" % job['expt_dir'])
+    bestJob.write("Dataset: %s\n" % dataname)
+    bestJob.write("Num trees trained: %s\n" % numtrees)
+    bestJob.write("Parameters: %s\n" % params)
+    
+    # Load up this module and run
+    if main_file[-3:] == '.py':
+        main_file = main_file[:-3]
+    module  = __import__(main_file)
+    result = module.main(job['id'], params, dataname, numtrees)
+    
+    bestJob.write('MSE from Best Parameters: %s\n' % result)
+    bestJob.write('Train Time: %s\n' % trainingTime)
+    bestJob.write('Iterations: %s\n' % len(jobs))
+    bestJob.close()
+    
 def tired(db, experiment_name, resources):
     """
     return True if no resources are accepting jobs
@@ -318,6 +422,7 @@ def tired(db, experiment_name, resources):
             return False
     return True
 
+#TODO: Fix this to include more work
 def remove_broken_jobs(db, jobs, experiment_name, resources):
     """
     Look through jobs and for those that are pending but not alive, set
@@ -339,7 +444,9 @@ def get_suggestion(chooser, task_names, db, expt_dir, options, resource_name):
         raise Exception("Error: trying to obtain suggestion for 0 tasks ")
 
     experiment_name = options['experiment-name']
-
+    dataname = options['dataname']
+    numtrees = options['numtrees']
+    
     # We are only interested in the tasks in task_names
     task_options = { task: options["tasks"][task] for task in task_names }
     # For now we aren't doing any multi-task, so the below is simpler
@@ -353,7 +460,7 @@ def get_suggestion(chooser, task_names, db, expt_dir, options, resource_name):
 
     # "Fit" the chooser - give the chooser data and let it fit the model.
     hypers = chooser.fit(task_group, hypers, task_options)
-
+    
     # Save the hyperparameters to the database.
     save_hypers(hypers, db, experiment_name)
 
@@ -380,13 +487,15 @@ def get_suggestion(chooser, task_names, db, expt_dir, options, resource_name):
 
 
     jobs = load_jobs(db, experiment_name)
-
+    
     job_id = len(jobs) + 1
 
     job = {
         'id'          : job_id,
         'params'      : task_group.paramify(suggested_input),
         'expt_dir'    : expt_dir,
+        'dataname'    : dataname,
+        'numtrees'    : numtrees,
         'tasks'       : task_names,
         'resource'    : resource_name,
         'main-file'   : main_file,
@@ -450,9 +559,7 @@ def load_task_group(db, options, task_names=None):
                     for task in task_names}
 
         task_group.add_nan_task_if_nans()
-
-        # TODO: record costs
-
+        
     return task_group
 
 
